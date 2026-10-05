@@ -6,9 +6,21 @@ Data model:
     Conversation.messages: append-only list of Message
 """
 import logging
+import time
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+MAX_BODY_LENGTH = 500  # body must be strictly shorter than this
+
+
+@dataclass(frozen=True)
+class Message:
+    message_id: int
+    convo_id: int
+    sender_id: str
+    body: str
+    timestamp: float
 
 
 @dataclass
@@ -23,6 +35,8 @@ class Messenger:
         self._conversations = {}  # convo_id -> Conversation
         self._convo_by_members = {}  # frozenset(user_ids) -> convo_id
         self._next_convo_id = 1
+        self._next_message_id = 1
+        self._message_index = {}  # message_id -> (convo_id, idx in convo.messages)
 
     # ---- validation helpers ----
     @staticmethod
@@ -30,6 +44,15 @@ class Messenger:
         if not isinstance(user_id, str) or not user_id.strip():
             logger.error("invalid user_id: %r", user_id)
             raise ValueError("user_id must be a non-empty string")
+
+    @staticmethod
+    def _validate_body(body):
+        if not isinstance(body, str) or not body.strip():
+            logger.error("invalid message body: %r", body)
+            raise ValueError("message body must be a non-empty string")
+        if len(body) >= MAX_BODY_LENGTH:
+            logger.error("message body too long: %d chars", len(body))
+            raise ValueError(f"message body must be under {MAX_BODY_LENGTH} characters")
 
     def _get_convo(self, convo_id):
         convo = self._conversations.get(convo_id)
@@ -80,3 +103,22 @@ class Messenger:
         """Return the participant ids of a conversation. Only members may ask."""
         convo = self._get_convo_for_member(convo_id, user_id)
         return sorted(convo.participants)
+
+    def send_message(self, convo_id, sender_id, body):
+        """Append a message to the conversation and return its message_id."""
+        convo = self._get_convo_for_member(convo_id, sender_id)
+        self._validate_body(body)
+
+        idx = len(convo.messages)
+        msg = Message(self._next_message_id, convo_id, sender_id, body, time.time())
+        self._next_message_id += 1
+        convo.messages.append(msg)
+        self._message_index[msg.message_id] = (convo_id, idx)
+        # the sender has obviously seen their own message
+        convo.participants[sender_id] = idx
+        return msg.message_id
+
+    def get_messages(self, convo_id, user_id):
+        """Return all messages in the conversation, oldest first. Only members may read."""
+        convo = self._get_convo_for_member(convo_id, user_id)
+        return list(convo.messages)
