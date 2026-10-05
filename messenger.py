@@ -54,6 +54,17 @@ class Messenger:
             logger.error("message body too long: %d chars", len(body))
             raise ValueError(f"message body must be under {MAX_BODY_LENGTH} characters")
 
+    def _message_idx(self, convo, message_id):
+        """Index of message_id within convo.messages."""
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            logger.error("invalid message_id: %r", message_id)
+            raise ValueError("message_id must be an integer")
+        location = self._message_index.get(message_id)
+        if location is None or location[0] != convo.convo_id:
+            logger.error("message %r not found in convo %r", message_id, convo.convo_id)
+            raise LookupError(f"message {message_id!r} not in conversation {convo.convo_id!r}")
+        return location[1]
+
     def _get_convo(self, convo_id):
         convo = self._conversations.get(convo_id)
         if convo is None:
@@ -122,3 +133,20 @@ class Messenger:
         """Return all messages in the conversation, oldest first. Only members may read."""
         convo = self._get_convo_for_member(convo_id, user_id)
         return list(convo.messages)
+
+    def mark_read(self, convo_id, user_id, message_id):
+        """Record that user has read everything up to and including message_id.
+
+        Only the user's bookmark moves, and never backwards, so marking an
+        older message is a no-op.
+        """
+        convo = self._get_convo_for_member(convo_id, user_id)
+        idx = self._message_idx(convo, message_id)
+        convo.participants[user_id] = max(convo.participants[user_id], idx)
+
+    def get_read_by(self, convo_id, user_id, message_id):
+        """Return who has read a message (excluding its sender). Only members may ask."""
+        convo = self._get_convo_for_member(convo_id, user_id)
+        idx = self._message_idx(convo, message_id)
+        sender = convo.messages[idx].sender_id
+        return sorted(u for u, last_read in convo.participants.items() if u != sender and last_read >= idx)

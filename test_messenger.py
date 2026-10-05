@@ -254,5 +254,124 @@ class TestGetMessages(unittest.TestCase):
             msg.body = "tampered"
 
 
+class TestMarkRead(unittest.TestCase):
+    def setUp(self):
+        self.m = Messenger()
+        self.cid = self.m.start_conversation("alice", ["bob", "sarah"])
+        self.ids = [self.m.send_message(self.cid, "alice", f"msg {i}") for i in range(5)]
+
+    def bookmark(self, user):
+        return self.m._conversations[self.cid].participants[user]
+
+    def test_bookmark_advances(self):
+        self.m.mark_read(self.cid, "bob", self.ids[2])
+        self.assertEqual(self.bookmark("bob"), 2)
+        self.m.mark_read(self.cid, "bob", self.ids[4])
+        self.assertEqual(self.bookmark("bob"), 4)
+
+    def test_reading_older_message_does_not_move_bookmark_back(self):
+        self.m.mark_read(self.cid, "bob", self.ids[4])
+        self.m.mark_read(self.cid, "bob", self.ids[1])
+        self.assertEqual(self.bookmark("bob"), 4)
+        self.assertEqual(self.m.get_read_by(self.cid, "alice", self.ids[4]), ["bob"])
+
+    def test_marking_same_message_twice_is_a_noop(self):
+        self.m.mark_read(self.cid, "bob", self.ids[2])
+        self.m.mark_read(self.cid, "bob", self.ids[2])
+        self.assertEqual(self.bookmark("bob"), 2)
+
+    def test_back_to_back_marks(self):
+        for mid in self.ids:
+            self.m.mark_read(self.cid, "bob", mid)
+        self.assertEqual(self.bookmark("bob"), 4)
+
+    def test_only_callers_bookmark_moves(self):
+        self.m.mark_read(self.cid, "bob", self.ids[3])
+        self.assertEqual(self.bookmark("sarah"), -1)
+        self.assertEqual(self.bookmark("alice"), 4)  # sender of everything
+
+    def test_sender_marking_own_older_message_keeps_bookmark(self):
+        self.m.mark_read(self.cid, "alice", self.ids[0])
+        self.assertEqual(self.bookmark("alice"), 4)
+
+    def test_new_message_after_read_is_unread(self):
+        self.m.mark_read(self.cid, "bob", self.ids[4])
+        new = self.m.send_message(self.cid, "sarah", "later")
+        self.assertEqual(self.m.get_read_by(self.cid, "alice", new), [])
+        self.m.mark_read(self.cid, "bob", new)
+        self.assertEqual(self.m.get_read_by(self.cid, "alice", new), ["bob"])
+
+    def test_non_member_rejected(self):
+        with self.assertRaises(PermissionError):
+            self.m.mark_read(self.cid, "mallory", self.ids[0])
+
+    def test_unknown_message_rejected(self):
+        for bad in [999, 0, -1]:
+            with self.subTest(message=bad), self.assertRaises(LookupError):
+                self.m.mark_read(self.cid, "bob", bad)
+        self.assertEqual(self.bookmark("bob"), -1)
+
+    def test_message_from_another_conversation_rejected(self):
+        other = self.m.start_conversation("alice", ["bob"])
+        foreign = self.m.send_message(other, "alice", "dm")
+        with self.assertRaises(LookupError):
+            self.m.mark_read(self.cid, "bob", foreign)
+        self.assertEqual(self.bookmark("bob"), -1)
+
+    def test_bad_inputs_rejected(self):
+        for bad in [None, "1", 1.5, True, [1]]:
+            with self.subTest(message=bad), self.assertRaises(ValueError):
+                self.m.mark_read(self.cid, "bob", bad)
+        for bad in [None, "", 5]:
+            with self.subTest(user=bad), self.assertRaises(ValueError):
+                self.m.mark_read(self.cid, bad, self.ids[0])
+        for bad in [999, None]:
+            with self.subTest(convo=bad), self.assertRaises(LookupError):
+                self.m.mark_read(bad, "bob", self.ids[0])
+
+
+class TestGetReadBy(unittest.TestCase):
+    def setUp(self):
+        self.m = Messenger()
+        self.cid = self.m.start_conversation("alice", ["bob", "sarah"])
+        self.ids = [self.m.send_message(self.cid, "alice", f"msg {i}") for i in range(3)]
+
+    def test_nobody_has_read_yet(self):
+        self.assertEqual(self.m.get_read_by(self.cid, "alice", self.ids[0]), [])
+
+    def test_partial_readers_in_group(self):
+        self.m.mark_read(self.cid, "bob", self.ids[1])
+        self.assertEqual(self.m.get_read_by(self.cid, "alice", self.ids[0]), ["bob"])
+        self.assertEqual(self.m.get_read_by(self.cid, "alice", self.ids[1]), ["bob"])
+        self.assertEqual(self.m.get_read_by(self.cid, "alice", self.ids[2]), [])
+
+    def test_everyone_read(self):
+        self.m.mark_read(self.cid, "bob", self.ids[2])
+        self.m.mark_read(self.cid, "sarah", self.ids[2])
+        self.assertEqual(self.m.get_read_by(self.cid, "alice", self.ids[0]), ["bob", "sarah"])
+
+    def test_sender_excluded(self):
+        self.assertNotIn("alice", self.m.get_read_by(self.cid, "bob", self.ids[0]))
+
+    def test_any_member_can_ask(self):
+        self.m.mark_read(self.cid, "bob", self.ids[0])
+        self.assertEqual(self.m.get_read_by(self.cid, "sarah", self.ids[0]), ["bob"])
+
+    def test_non_member_rejected(self):
+        with self.assertRaises(PermissionError):
+            self.m.get_read_by(self.cid, "mallory", self.ids[0])
+
+    def test_bad_inputs_rejected(self):
+        with self.assertRaises(LookupError):
+            self.m.get_read_by(self.cid, "alice", 999)
+        with self.assertRaises(LookupError):
+            self.m.get_read_by(None, "alice", self.ids[0])
+        for bad in [None, "1", True]:
+            with self.subTest(message=bad), self.assertRaises(ValueError):
+                self.m.get_read_by(self.cid, "alice", bad)
+        with self.assertRaises(ValueError):
+            self.m.get_read_by(self.cid, None, self.ids[0])
+
+
 if __name__ == "__main__":
     unittest.main()
